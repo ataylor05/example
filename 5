@@ -1,0 +1,23 @@
+data "azurerm_key_vault" "keyvault_ops" {
+  name                = "teokyllckv"
+  resource_group_name = "Vault"
+}
+
+data "azurerm_key_vault_secrets" "ops_secrets" {
+  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
+}
+
+data "azurerm_key_vault_secret" "ops_secrets" {
+  for_each = toset(data.azurerm_key_vault_secrets.ops_secrets.names)
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
+}
+
+data "azurerm_key_vault_certificate" "example" {
+  for_each = {
+    for key, value in data.azurerm_key_vault_secret.ops_secrets :
+    key => value if (trimprefix(value.name, "platform--") != value.name)
+  }
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
+}
