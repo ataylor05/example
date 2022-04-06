@@ -3,16 +3,29 @@ data "azurerm_key_vault" "keyvault_ops" {
   resource_group_name = "Vault"
 }
 
+# This has all secret names regardless of type
 data "azurerm_key_vault_secrets" "ops_secrets" {
   key_vault_id = data.azurerm_key_vault.keyvault_ops.id
 }
 
+# This iterates over the secret list of names
 data "azurerm_key_vault_secret" "ops_secrets" {
   for_each = toset(data.azurerm_key_vault_secrets.ops_secrets.names)
   name         = each.key
   key_vault_id = data.azurerm_key_vault.keyvault_ops.id
 }
 
+# This is a list of secrets matching the prefix
+data "azurerm_key_vault_secret" "ops_secret" {
+  for_each = {
+    for key, value in data.azurerm_key_vault_secret.ops_secrets :
+    key => value if (trimprefix(value.name, "platform--") != value.name)
+  }
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
+}
+
+# This is a list of certificates matching the prefix
 data "azurerm_key_vault_certificate" "example" {
   for_each = {
     for key, value in data.azurerm_key_vault_secret.ops_secrets :
