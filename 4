@@ -1,0 +1,18 @@
+data "azurerm_key_vault" "keyvault_ops" {
+  provider            = azurerm.management
+  name                = var.azure_management_keyvault_ops_name
+  resource_group_name = var.azure_management_keyvault_ops_resource_group
+}
+
+data "azurerm_key_vault_secrets" "ops_secrets" {
+  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
+}
+
+data "azurerm_key_vault_secret" "storage_region_secret" {
+  for_each = {
+    for key, value in data.azurerm_key_vault_secret.storage_region_secret :
+    key => value if (trimprefix(value.name, "test--") != value.name)
+  }
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.keyvault_storage_region[0].id
+}
