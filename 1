@@ -1,10 +1,65 @@
+locals {
+    secret_name_prefix = "test"
+}
+
+data "azurerm_client_config" "current" {}
+
+data "azurerm_key_vault" "source_vault" {
+  name                = "teokyllckv"
+  resource_group_name = var.ops_keyvault_rg
+}
+
+resource "azurerm_key_vault" "dest" {
+  name                        = "dest"
+  location                    = "eastus"
+  resource_group_name         = var.ops_keyvault_rg
+  enabled_for_disk_encryption = false
+  tenant_id                   = data.azurerm_client_config.current.tenant_id
+  purge_protection_enabled    = false
+
+  sku_name = "standard"
+
+  access_policy {
+    tenant_id = data.azurerm_client_config.current.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    key_permissions = [
+      "Get", "List"
+    ]
+
+    secret_permissions = [
+      "Get", "List", "Set"
+    ]
+
+    storage_permissions = [
+      "Get", "List", "Set"
+    ]
+
+    certificate_permissions = [
+        "Get", "Create", "List", "Import", "Delete"
+    ]
+  }
+}
+
+data "azurerm_key_vault_certificate" "ops_certificate" {
+  for_each     = toset(var.system_ops_certificate_names)
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.source_vault.id
+}
+
+data "azurerm_key_vault_secret" "ops_certificate" {
+  for_each     = toset(var.system_ops_certificate_names)
+  name         = each.key
+  key_vault_id = data.azurerm_key_vault.source_vault.id
+}
+
 resource "azurerm_key_vault_certificate" "app_certificate" {
   for_each     = data.azurerm_key_vault_certificate.ops_certificate
-  name         = substr(each.value.name, length(var.system_ops_secret_name_prefix), -1)
+  name         = each.value.name
   tags         = each.value.tags
-  key_vault_id = azurerm_key_vault.keyvault_app.id
+  key_vault_id = azurerm_key_vault.dest.id
   certificate {
-    contents = data.azurerm_key_vault_secret.ops_certificate[substr(each.value.name, length(local.secret_name_prefix), -1)].value
+    contents = data.azurerm_key_vault_secret.ops_certificate[each.key].value
   }
 
   dynamic "certificate_policy" {
