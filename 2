@@ -1,6 +1,0 @@
-data "azurerm_key_vault_secret" "ops_certificate" {
-  provider     = azurerm.management
-  for_each     = toset(var.system_ops_certificate_names)
-  name         = "${var.system_ops_secret_name_prefix}${local.secret_name_prefix}${each.key}" # Prepend <system_namespace>-- to each secret name to ensure isolation.
-  key_vault_id = data.azurerm_key_vault.keyvault_ops.id
-}
