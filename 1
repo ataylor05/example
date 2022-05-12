@@ -1,13 +1,18 @@
 import msal
 import requests
-from azure.identity import AuthorizationCodeCredential
-import jwt
+import argparse
+import json
+import datetime
 
-clientId = ""
-clientSecret = ""
-aadTenant = "5221c46c-b7b6-41e0-a534-78064848cd54"
-authority = "https://login.microsoftonline.com/" + aadTenant
+parser = argparse.ArgumentParser()
+parser.add_argument('--clientid', type=str, required=True)
+parser.add_argument('--clientsecret', type=str, required=True)
+parser.add_argument('--aadtenant', type=str, required=False, default="5ad90dc5-b02a-4f06-8f90-14d6bccf9282")
+args = parser.parse_args()
+
+authority = "https://login.microsoftonline.com/" + args.aadtenant
 scope = ['https://graph.microsoft.com/.default']
+currentTime = datetime.datetime.now(datetime.timezone.utc)
 
 def getAadAccessToken (clientId, clientSecret, authority, scope):
     app = msal.ConfidentialClientApplication(clientId, authority=authority, client_credential = clientSecret)
@@ -23,12 +28,24 @@ def msgraphGetRequest(resource, requestHeaders):
     results = requests.get(resource, headers=requestHeaders).json()
     return results
 
-accessToken = getAadAccessToken(clientId, clientSecret, authority, scope)
+accessToken = getAadAccessToken(args.clientid, args.clientsecret, authority, scope)
 requestHeaders = {'Authorization': 'Bearer ' + accessToken}
-#credential = AuthorizationCodeCredential(accessToken)
 
 resource = "https://graph.microsoft.com/v1.0/applications"
-print(msgraphGetRequest(resource, requestHeaders))
-
-#resource = "https://graph.microsoft.com/v1.0/servicePrincipals/028a446a-e196-45b2-8012-a03262b65122/ownedObjects"
-#print(msgraphGetRequest(resource, requestHeaders))
+azApps = msgraphGetRequest(resource, requestHeaders)
+for azApp in azApps["value"]:
+    try:
+        appId = azApp["id"]
+        azAppDisplayName = azApp["displayName"]
+        azAppSecretCreationTime = datetime.datetime.strptime(azApp["passwordCredentials"][0]["startDateTime"], '%Y-%m-%dT%H:%M:%S.%f%z')
+        timeDelta = currentTime - azAppSecretCreationTime
+        secretAge = timeDelta.days
+        print("SP Id " + appId + " " + azAppDisplayName + "'s client secret is " + str(secretAge) + " days old.")
+        if secretAge >= 180:
+            print("Secret is too old, rotating credential.")
+        elif secretAge <= 180 and secretAge >= 170:
+            print("Secret is close to expiring, emailing owner.")
+        print("")
+    except:
+        print(azApp["id"] + " - " + azApp["displayName"] + " does not have a secret")
+        print("")
