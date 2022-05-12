@@ -1,132 +1,34 @@
-locals {
-    secret_name_prefix = "test"
-}
+import msal
+import requests
+from azure.identity import AuthorizationCodeCredential
+import jwt
 
-data "azurerm_client_config" "current" {}
+clientId = ""
+clientSecret = ""
+aadTenant = "5221c46c-b7b6-41e0-a534-78064848cd54"
+authority = "https://login.microsoftonline.com/" + aadTenant
+scope = ['https://graph.microsoft.com/.default']
 
-data "azurerm_key_vault" "source_vault" {
-  name                = "teokyllckv"
-  resource_group_name = var.ops_keyvault_rg
-}
+def getAadAccessToken (clientId, clientSecret, authority, scope):
+    app = msal.ConfidentialClientApplication(clientId, authority=authority, client_credential = clientSecret)
+    accessToken = app.acquire_token_for_client(scopes=scope)
+    if accessToken['access_token']:
+        print('New access token retreived....')
+        return accessToken['access_token']
+    else:
+        print('Error aquiring authorization token. Check your tenantID, clientID and clientSecret.')
+        exit(1)
 
-resource "azurerm_key_vault" "dest" {
-  name                        = "dest"
-  location                    = "eastus"
-  resource_group_name         = var.ops_keyvault_rg
-  enabled_for_disk_encryption = false
-  tenant_id                   = data.azurerm_client_config.current.tenant_id
-  purge_protection_enabled    = false
+def msgraphGetRequest(resource, requestHeaders):
+    results = requests.get(resource, headers=requestHeaders).json()
+    return results
 
-  sku_name = "standard"
+accessToken = getAadAccessToken(clientId, clientSecret, authority, scope)
+requestHeaders = {'Authorization': 'Bearer ' + accessToken}
+#credential = AuthorizationCodeCredential(accessToken)
 
-  access_policy {
-    tenant_id = data.azurerm_client_config.current.tenant_id
-    object_id = data.azurerm_client_config.current.object_id
+resource = "https://graph.microsoft.com/v1.0/applications"
+print(msgraphGetRequest(resource, requestHeaders))
 
-    key_permissions = [
-      "Get", "List"
-    ]
-
-    secret_permissions = [
-      "Get", "List", "Set"
-    ]
-
-    storage_permissions = [
-      "Get", "List", "Set"
-    ]
-
-    certificate_permissions = [
-        "Get", "Create", "List", "Import", "Delete"
-    ]
-  }
-}
-
-data "azurerm_key_vault_certificate" "ops_certificate" {
-  for_each     = toset(var.system_ops_certificate_names)
-  name         = each.key
-  key_vault_id = data.azurerm_key_vault.source_vault.id
-}
-
-data "azurerm_key_vault_secret" "ops_certificate" {
-  for_each     = toset(var.system_ops_certificate_names)
-  name         = each.key
-  key_vault_id = data.azurerm_key_vault.source_vault.id
-}
-
-resource "azurerm_key_vault_certificate" "app_certificate" {
-  for_each     = data.azurerm_key_vault_certificate.ops_certificate
-  name         = each.value.name
-  tags         = each.value.tags
-  key_vault_id = azurerm_key_vault.dest.id
-  certificate {
-    contents = data.azurerm_key_vault_secret.ops_certificate[each.key].value
-  }
-
-  dynamic "certificate_policy" {
-    for_each = each.value.certificate_policy
-    content {
-      dynamic "issuer_parameters" {
-        for_each = certificate_policy.value.issuer_parameters
-        content {
-          name = issuer_parameters.value["name"]
-        }
-      }
-
-      dynamic "key_properties" {
-        for_each = certificate_policy.value.key_properties
-        content {
-          exportable = key_properties.value["exportable"]
-          key_size   = key_properties.value["key_size"]
-          key_type   = key_properties.value["key_type"]
-          reuse_key  = key_properties.value["reuse_key"]
-        }
-      }
-
-      dynamic "lifetime_action" {
-        for_each = certificate_policy.value.lifetime_action
-        content {
-          dynamic "action" {
-            for_each = lifetime_action.value.action
-            content {
-              action_type = action.value["action_type"]
-            }
-          }
-
-          dynamic "trigger" {
-            for_each = lifetime_action.value.trigger
-            content {
-              days_before_expiry  = trigger.value["days_before_expiry"]
-              lifetime_percentage = trigger.value["lifetime_percentage"]
-            }
-          }
-        }
-      }
-
-      dynamic "secret_properties" {
-        for_each = certificate_policy.value.secret_properties
-        content {
-          content_type = secret_properties.value["content_type"]
-        }
-      }
-
-      dynamic "x509_certificate_properties" {
-        for_each = certificate_policy.value.x509_certificate_properties
-        content {
-          extended_key_usage = x509_certificate_properties.value["extended_key_usage"]
-          key_usage          = x509_certificate_properties.value["key_usage"]
-          subject            = x509_certificate_properties.value["subject"]
-          validity_in_months = x509_certificate_properties.value["validity_in_months"]
-
-          dynamic "subject_alternative_names" {
-            for_each = x509_certificate_properties.value.subject_alternative_names
-            content {
-              dns_names = subject_alternative_names.value["dns_names"]
-              emails    = subject_alternative_names.value["emails"]
-              upns      = subject_alternative_names.value["upns"]
-            }
-          }
-        }
-      }
-    }
-  }
-}
+#resource = "https://graph.microsoft.com/v1.0/servicePrincipals/028a446a-e196-45b2-8012-a03262b65122/ownedObjects"
+#print(msgraphGetRequest(resource, requestHeaders))
