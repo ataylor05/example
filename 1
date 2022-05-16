@@ -3,12 +3,14 @@ import requests
 import argparse
 import json
 import datetime
-import traceback
+import smtplib
+from email.mime.text import MIMEText
 
-credentialMaxAge = 0
+credentialMaxAge = 180
 credentialEmailWarningAge = 0
 
-def getAzApiRequestHeader (clientId, clientSecret, authority, scope):
+def getAzApiRequestHeader (clientId, clientSecret, aadTenant, scope):
+    authority = "https://login.microsoftonline.com/" + aadTenant
     app = msal.ConfidentialClientApplication(clientId, authority=authority, client_credential = clientSecret)
     accessToken = app.acquire_token_for_client(scopes=scope)
     if accessToken["access_token"]:
@@ -24,16 +26,18 @@ def msgraphGetRequest(resource, requestHeaders):
     return results
 
 def msgraphPostRequest(resource, requestHeaders, payload):
-    results = requests.post(resource, headers=requestHeaders, data=json.dumps(payload)).json()
+    try:
+        results = requests.post(resource, headers=requestHeaders, data=json.dumps(payload)).json()
+    except:
+        results = requests.post(resource, headers=requestHeaders, data=json.dumps(payload))
     return results
 
 def msgraphPutRequest(resource, requestHeaders, payload):
     results = requests.put(resource, headers=requestHeaders, data=json.dumps(payload)).json()
     return results
 
-def checkSecretAge(currentTime, azApp):
-    azAppSecretCreationTime = datetime.datetime.strptime(azApp["passwordCredentials"][0]["startDateTime"], "%Y-%m-%dT%H:%M:%S.%f%z")
-    timeDelta = currentTime - azAppSecretCreationTime
+def checkSecretAge(currentTime, secretCreationTime):
+    timeDelta = currentTime - secretCreationTime
     return timeDelta.days
 
 def rotateSecret(requestHeaders, removeAppSecretUrl, removeAppSecretPayload, addAppSecretUrl, addAppSecretPayload):
@@ -41,56 +45,77 @@ def rotateSecret(requestHeaders, removeAppSecretUrl, removeAppSecretPayload, add
     newSecret = msgraphPostRequest(addAppSecretUrl, requestHeaders, addAppSecretPayload)
     return newSecret["secretText"]
 
+def writeKeyVaultSecret(requestHeaders, keyVaultName, secretName, secretText):
+    keyVaultSetUrl = "https://" + keyVaultName + ".vault.azure.net/secrets/" + secretName + "?api-version=7.3"
+    keyVaultSetPayload = {"value": secretText}
+    request = msgraphPutRequest(keyVaultSetUrl, requestHeaders, keyVaultSetPayload)
+    return request
+
+def sendEmailWarning(appOwnerEmail, displayName, clientId, secretAge):
+    sender = "msfautomation@docusign.com"
+    receivers = [appOwnerEmail]
+    body = """You have been identified as an Azure application (Service Principal) owner on the Unity/Unity Dev tenant.
+    The application named {displayName} with a clientId of {clientId} has a secret that is {secretAge} days old.
+    The MSF team will automaticially rotate this secret after 180 days and you will need to reach out to #msf-execution-team on Slack to retrieve the new secret.
+    We encourage you to rotate this secret yourself to ensure you have a smoother transition of secrets.
+    """.format(displayName=displayName, clientId=clientId, secretAge=secretAge)
+    msg = MIMEText(body)
+    msg["Subject"] = "You have an Azure AD application with a secret that will be rotated soon"
+    msg["From"] = "msfautomation@docusign.com"
+    msg["To"] = appOwnerEmail
+    with smtplib.SMTP("192.168.1.4", 25) as server:
+        server.sendmail(sender, receivers, msg.as_string())
+        print("Successfully sent email")
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--clientid", type=str, required=True)
 parser.add_argument("--clientsecret", type=str, required=True)
 parser.add_argument("--aadtenant", type=str, required=False, default="5ad90dc5-b02a-4f06-8f90-14d6bccf9282")
 parser.add_argument("--azkeyvaultname", type=str, required=True)
 args = parser.parse_args()
-authority = "https://login.microsoftonline.com/" + args.aadtenant
-scope = ["https://graph.microsoft.com/.default"]
-requestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, authority, scope)
-currentTime = datetime.datetime.now(datetime.timezone.utc)
 
+aadRequestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, args.aadtenant, ["https://graph.microsoft.com/.default"])
+keyVaultRequestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, args.aadtenant, ["https://vault.azure.net/.default"])
+
+currentTime = datetime.datetime.utcnow()
 listAppsUrl = "https://graph.microsoft.com/v1.0/applications"
-azApps = msgraphGetRequest(listAppsUrl, requestHeaders)
+azApps = msgraphGetRequest(listAppsUrl, aadRequestHeaders)
+azAppsWithSecrets = []
+
 for azApp in azApps["value"]:
     try:
-        secretAge = checkSecretAge(currentTime, azApp)
-        print("SP Id " + azApp["id"] + " " + azApp["displayName"] + "'s client secret is " + str(secretAge) + " days old.")
-        if secretAge >= credentialMaxAge:
-            print("Secret is too old, rotating credential.")
-            # Set secret removal vars
-            removeAppSecretUrl = "https://graph.microsoft.com/v1.0/applications/" + azApp["id"] + "/removePassword"
-            removeAppSecretPayload = {"keyId": azApp["passwordCredentials"][0]["keyId"]}
+        azAppsWithSecrets.append([azApp["id"], azApp["displayName"], azApp["passwordCredentials"][0]["startDateTime"], azApp["passwordCredentials"][0]["keyId"]])
+    except:
+        pass
+    
+for azAppsWithSecret in azAppsWithSecrets:
+    appId = azAppsWithSecret[0]
+    displayName = azAppsWithSecret[1]
+    dateAsString = azAppsWithSecret[2]
+    keyId = azAppsWithSecret[3]
+    cleanedTime = dateAsString.split(".")
+    secretCreationTime = datetime.datetime.strptime(cleanedTime[0], "%Y-%m-%dT%H:%M:%S")
+    secretAge = checkSecretAge(currentTime, secretCreationTime)
+    print(appId + " - " + displayName + "'s secret is " + str(secretAge) + " days old.")
+    
+    if secretAge >= credentialMaxAge:
+        print("Secret is too old, rotating credential.")
+        removeAppSecretUrl = "https://graph.microsoft.com/v1.0/applications/" + appId + "/removePassword"
+        removeAppSecretPayload = {"keyId": keyId}
+        addAppSecretUrl = "https://graph.microsoft.com/v1.0/applications/" + appId + "/addPassword"
+        addAppSecretPayload = {"displayName": "rotated_by_automation"}
+        newSecret = rotateSecret(aadRequestHeaders, removeAppSecretUrl, removeAppSecretPayload, addAppSecretUrl, addAppSecretPayload)
+        
+        secretName = displayName + "-client-id"
+        request = writeKeyVaultSecret(keyVaultRequestHeaders, args.azkeyvaultname, secretName, appId)
+        print(request)
 
-            # Set secret creation vars
-            addAppSecretUrl = "https://graph.microsoft.com/v1.0/applications/" + azApp["id"] + "/addPassword"
-            addAppSecretPayload = {"displayName": "rotated_by_automation"}
+        secretName = displayName + "-client-secret"
+        request = writeKeyVaultSecret(keyVaultRequestHeaders, args.azkeyvaultname, secretName, newSecret)
+        print(request)
 
-            # Rotate the secret
-            newSecret = rotateSecret(requestHeaders, removeAppSecretUrl, removeAppSecretPayload, addAppSecretUrl, addAppSecretPayload)
+    elif secretAge < credentialMaxAge and secretAge >= credentialEmailWarningAge:
+        print("Secret is close to expiring, emailing owner.")
+        sendEmailWarning("ataylor@kentuckymyco.com", displayName, appId, secretAge)
 
-            # Get Key Vault access token
-            scope = ["https://vault.azure.net/.default"]
-            requestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, authority, scope)
-            
-            # Create secret for clientId
-            secretName = azApp["displayName"] + "-client-id"
-            keyVaultSetUrl = "https://" + args.azkeyvaultname + ".vault.azure.net/secrets/" + secretName + "?api-version=7.3"
-            keyVaultSetPayload = {"value": azApp["id"]}
-            request = msgraphPutRequest(keyVaultSetUrl, requestHeaders, keyVaultSetPayload)
-
-            # Create secret for clientSecret
-            secretName = azApp["displayName"] + "-client-secret"
-            keyVaultSetUrl = "https://" + args.azkeyvaultname + ".vault.azure.net/secrets/" + secretName + "?api-version=7.3"
-            keyVaultSetPayload = {"value": newSecret}
-            request = msgraphPutRequest(keyVaultSetUrl, requestHeaders, keyVaultSetPayload)
-
-        elif secretAge < credentialMaxAge and secretAge >= credentialEmailWarningAge:
-            print("Secret is close to expiring, emailing owner.")
-        print("")
-    except Exception:
-        traceback.print_exc()
-        print("SP Id " + azApp["id"] + " " + azApp["displayName"] + " does not have a secret")
-        print("")
+    print("")
