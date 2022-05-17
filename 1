@@ -36,6 +36,11 @@ def msgraphPutRequest(resource, requestHeaders, payload):
     results = requests.put(resource, headers=requestHeaders, data=json.dumps(payload)).json()
     return results
 
+def getAadApps(aadRequestHeaders):
+    listAppsUrl = "https://graph.microsoft.com/v1.0/applications"
+    request = msgraphGetRequest(listAppsUrl, aadRequestHeaders)
+    return request["value"]
+
 def checkSecretAge(currentTime, secretCreationTime):
     timeDelta = currentTime - secretCreationTime
     return timeDelta.days
@@ -67,6 +72,16 @@ def sendEmailWarning(appOwnerEmail, displayName, clientId, secretAge):
         server.sendmail(sender, receivers, msg.as_string())
         print("Successfully sent email")
 
+def getAadAppOwners(appId, aadRequestHeaders):
+    appOwnerUrl = "https://graph.microsoft.com/v1.0/applications/" + appId + "/owners"
+    request = msgraphGetRequest(appOwnerUrl, aadRequestHeaders)
+    return request
+
+def getUserAltEmail(userId, aadRequestHeaders):
+    userDetailsUrl = "https://graph.microsoft.com/v1.0/users/" + userId + "?$select=OtherMails"
+    request = msgraphGetRequest(userDetailsUrl, aadRequestHeaders)
+    return request["otherMails"][0]
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--clientid", type=str, required=True)
 parser.add_argument("--clientsecret", type=str, required=True)
@@ -78,11 +93,10 @@ aadRequestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, args
 keyVaultRequestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, args.aadtenant, ["https://vault.azure.net/.default"])
 
 currentTime = datetime.datetime.utcnow()
-listAppsUrl = "https://graph.microsoft.com/v1.0/applications"
-azApps = msgraphGetRequest(listAppsUrl, aadRequestHeaders)
+azApps = getAadApps(aadRequestHeaders)
 azAppsWithSecrets = []
 
-for azApp in azApps["value"]:
+for azApp in azApps:
     try:
         azAppsWithSecrets.append([azApp["id"], azApp["displayName"], azApp["passwordCredentials"][0]["startDateTime"], azApp["passwordCredentials"][0]["keyId"]])
     except:
@@ -116,6 +130,11 @@ for azAppsWithSecret in azAppsWithSecrets:
 
     elif secretAge < credentialMaxAge and secretAge >= credentialEmailWarningAge:
         print("Secret is close to expiring, emailing owner.")
-        sendEmailWarning("ataylor@kentuckymyco.com", displayName, appId, secretAge)
+        appOwnersRequest = getAadAppOwners(appId, aadRequestHeaders)
+        appOwners = appOwnersRequest["value"]
+        for appOwner in appOwners:
+            appOwnerId = appOwner["id"]
+            appOwnerEmail = getUserAltEmail(appOwnerId, aadRequestHeaders)
+            sendEmailWarning(appOwnerEmail, displayName, appId, secretAge)
 
     print("")
