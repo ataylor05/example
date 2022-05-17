@@ -1,19 +1,67 @@
-data "azurerm_key_vault_secret" "storage_region_secret" {
-  for_each     = toset(var.system_storage_keyvault_enabled ? data.azurerm_key_vault_secrets.storage_region_secrets[0].names : [])
-  name         = each.key
-  key_vault_id = data.azurerm_key_vault.keyvault_storage_region[0].id
-}
+import msal
+import requests
+import argparse
+import json
+import csv
 
-resource "azurerm_key_vault_secret" "app_secret_region" {
-  for_each = {
-    for key, value in data.azurerm_key_vault_secret.storage_region_secret :
-    key => value if var.system_storage_keyvault_enabled && (trimprefix(value.name, local.secret_name_prefix) != value.name) # starts with secret_name_prefix
-  }
+credentialMaxAge = 180
+credentialEmailWarningAge = 0
 
-  name         = trimsuffix(each.value.name, "--${var.region}") # Trim region suffix from datacenter secrets
-  value        = each.value.value
-  content_type = each.value.content_type
-  tags         = each.value.tags
+def getAzApiRequestHeader (clientId, clientSecret, aadTenant, scope):
+    authority = "https://login.microsoftonline.com/" + aadTenant
+    app = msal.ConfidentialClientApplication(clientId, authority=authority, client_credential = clientSecret)
+    accessToken = app.acquire_token_for_client(scopes=scope)
+    if accessToken["access_token"]:
+        print("New access token retreived....")
+        requestHeaders = {'Authorization': 'Bearer ' + accessToken["access_token"], 'Content-Type': 'application/json'}
+        return requestHeaders
+    else:
+        print("Error aquiring authorization token. Check your tenantID, clientID and clientSecret.")
+        exit(1)
 
-  key_vault_id = azurerm_key_vault.keyvault_app.id
-}
+def msgraphGetRequest(resource, requestHeaders):
+    results = requests.get(resource, headers=requestHeaders).json()
+    return results
+
+def getAadApps(aadRequestHeaders):
+    listAppsUrl = "https://graph.microsoft.com/v1.0/applications"
+    request = msgraphGetRequest(listAppsUrl, aadRequestHeaders)
+    return request["value"]
+
+def getAadAppOwners(appId, aadRequestHeaders):
+    appOwnerUrl = "https://graph.microsoft.com/v1.0/applications/" + appId + "/owners"
+    request = msgraphGetRequest(appOwnerUrl, aadRequestHeaders)
+    return request["value"]
+
+def getUserAltEmail(userId, aadRequestHeaders):
+    userDetailsUrl = "https://graph.microsoft.com/v1.0/users/" + userId + "?$select=OtherMails"
+    request = msgraphGetRequest(userDetailsUrl, aadRequestHeaders)
+    return request["otherMails"][0]
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--clientid", type=str, required=True)
+parser.add_argument("--clientsecret", type=str, required=True)
+parser.add_argument("--aadtenant", type=str, required=False, default="5ad90dc5-b02a-4f06-8f90-14d6bccf9282")
+args = parser.parse_args()
+
+aadRequestHeaders = getAzApiRequestHeader(args.clientid, args.clientsecret, args.aadtenant, ["https://graph.microsoft.com/.default"])
+
+azApps = getAadApps(aadRequestHeaders)
+azAppsWithSecrets = []
+
+for azApp in azApps:
+    try:
+        azAppsWithSecrets.append([azApp["id"], azApp["displayName"]])
+    except:
+        pass
+
+with open('app_owner_list.csv', mode='w') as csv_file:
+    writer = csv.writer(csv_file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+    for azAppsWithSecret in azAppsWithSecrets:
+        appId = azAppsWithSecret[0]
+        displayName = azAppsWithSecret[1]
+        appOwnersRequest = getAadAppOwners(appId, aadRequestHeaders)
+        for appOwner in appOwnersRequest:
+            emailPrefix = appOwner["userPrincipalName"].split('@')
+            docusignEmail = emailPrefix[0] + "@docusign.com"
+            writer.writerow([appId, displayName, appOwner["userPrincipalName"], docusignEmail])
