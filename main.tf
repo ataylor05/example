@@ -1,11 +1,20 @@
-module "defender_for_cloud_basic" {
-    source                   = "./modules/defender-for-cloud-basic"
-    policy_name              = var.policy_name
-    policy_definition_id     = var.policy_definition_id
-    azure_subscription_id    = var.azure_subscription_id
+resource "azurerm_resource_group" "log_analytics_rg" {
+  name     = var.resource_group_name
+  location = var.region
 }
 
-module "management_defender_for_cloud_plans" {
-    source                   = "./modules/defender-for-cloud-enchanced"
-    enchanced_security_plans = var.management_enchanced_security_plans
+resource "azurerm_log_analytics_workspace" "log_analytics_workspace" {
+  name                = var.workspace_name
+  location            = var.region
+  resource_group_name = azurerm_resource_group.log_analytics_rg.name
+  sku                 = "PerGB2018"
+  retention_in_days   = var.workspace_log_retention
+  tags                = var.common_tags
 }
+
+
+variable "workspace_name" {}
+variable "resource_group_name" {}
+variable "region" {}
+variable "common_tags" {}
+variable "workspace_log_retention" {}
